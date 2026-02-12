@@ -1,16 +1,14 @@
+import weave
 import asyncio
 import pyaudio
 import numpy as np
-from agents.realtime import RealtimeAgent, RealtimeRunner
-import websockets # required to patch the symbol
-
-import weave
 from weave.integrations import patch_openai_realtime
-weave.init("wandb/test-ga-realtime")
+from agents.realtime import RealtimeAgent, RealtimeRunner
+
+
+weave.init("ga-realtime-agents-example")
 patch_openai_realtime()
 
-# Detecting idle
-# When user or agent start/stops speaking
 
 # Required Audio Specs
 FORMAT = pyaudio.paInt16
@@ -26,8 +24,7 @@ async def main():
 
     agent = RealtimeAgent(
         name="Assistant",
-        instructions="You are a brief AI. Reply to voice.",
-
+        instructions="You are a tool using AI. Use tools to accomplish a task whenever possible"
     )
     runner = RealtimeRunner(agent, config={
         "model_settings": {

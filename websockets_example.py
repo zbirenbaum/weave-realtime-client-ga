@@ -10,7 +10,7 @@ import websockets
 import json
 
 import weave
-weave.init('wandb/ga-example')
+weave.init('ga-realtime-websockets-example')
 from weave.integrations import patch_openai_realtime
 patch_openai_realtime()
 
@@ -32,6 +32,8 @@ CHUNK = 1024
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+
+DEBUG_WRITE_LOG=False
 
 # Map tool name -> callable for function call dispatch
 TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
@@ -210,12 +212,11 @@ async def send_mic_audio(ws, mic) -> None:
 async def receive_events(ws, speaker) -> None:
     # Accumulate function call arguments across delta events
     pending_calls: dict[str, dict] = {}
-
     async for raw_message in ws:
-
-# Use "a" for append mode
-        with open("data.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(raw_message) + "\n")
+        # Use "a" for append mode
+        if DEBUG_WRITE_LOG:
+            with open("data.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(raw_message) + "\n")
 
         event = json.loads(raw_message)
         event_type = event.get("type", "")
@@ -283,16 +284,23 @@ async def receive_events(ws, speaker) -> None:
         elif event_type == "response.output_audio_transcript.done":
             pass
 
+        # Function call started - initialize pending call
+        elif event_type == "response.output_item.added":
+            item = event.get("item", {})
+            if item.get("type") == "function_call" and item.get("status") == "in_progress":
+                item_id = item.get("id", "")
+                pending_calls[item_id] = {
+                    "call_id": item.get("call_id", ""),
+                    "name": item.get("name", ""),
+                    "arguments": "",
+                }
+                print(f"\n[Function Call Started] {item.get('name', '')}")
+
         # Function call argument deltas - accumulate
         elif event_type == "response.function_call_arguments.delta":
             item_id = event.get("item_id", "")
-            if item_id not in pending_calls:
-                pending_calls[item_id] = {
-                    "call_id": event.get("call_id", ""),
-                    "name": event.get("name", ""),
-                    "arguments": "",
-                }
-            pending_calls[item_id]["arguments"] += event.get("delta", "")
+            if item_id in pending_calls:
+                pending_calls[item_id]["arguments"] += event.get("delta", "")
 
         elif event_type == "response.function_call_arguments.done":
             item_id = event.get("item_id", "")
@@ -317,20 +325,7 @@ async def receive_events(ws, speaker) -> None:
 
 
         elif event_type == "response.done":
-            response = event.get("response", {})
-
-            # Check for function calls in the response output
-            for output_item in response.get("output", []):
-                if output_item.get("type") == "function_call":
-                    item_id = output_item.get("id", "")
-                    # Only handle if not already handled via delta events
-                    if item_id not in pending_calls:
-                        await handle_function_call(
-                            ws,
-                            output_item.get("call_id", ""),
-                            output_item.get("name", ""),
-                            output_item.get("arguments", ""),
-                        )
+            pass
 
         elif event_type == "rate_limits.updated":
             pass  # Silently ignore rate limit updates
