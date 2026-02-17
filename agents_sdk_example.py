@@ -1,13 +1,40 @@
-import weave
+import argparse
 import asyncio
+import weave
 import pyaudio
 import numpy as np
 from weave.integrations import patch_openai_realtime
 from agents.realtime import RealtimeAgent, RealtimeRunner
 
+DEFAULT_WEAVE_PROJECT = "ga-realtime-agents-example"
 
-weave.init("ga-realtime-agents-example")
-patch_openai_realtime()
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Realtime agent with Weave logging")
+    parser.add_argument(
+        "--weave-project",
+        default=DEFAULT_WEAVE_PROJECT,
+        help=f"Weave project name (default: {DEFAULT_WEAVE_PROJECT})",
+    )
+    parser.add_argument(
+        "--input-device",
+        type=int,
+        default=0,
+        help="PyAudio input (mic) device index. Run mic_detect.py to list devices.",
+    )
+    parser.add_argument(
+        "--output-device",
+        type=int,
+        default=1,
+        help="PyAudio output (speaker) device index. Run mic_detect.py to list devices.",
+    )
+    return parser.parse_args()
+
+
+def init_weave(project_name: str | None = None) -> None:
+    name = project_name or DEFAULT_WEAVE_PROJECT
+    weave.init(name)
+    patch_openai_realtime()
 
 
 # Required Audio Specs
@@ -16,11 +43,11 @@ CHANNELS = 1
 RATE = 24000
 CHUNK = 1024
 
-async def main():
+async def main(*, input_device_index: int = 0, output_device_index: int = 1):
     p = pyaudio.PyAudio()
     # Setup Mic and Speaker
-    mic = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK, input_device_index=0)
-    speaker = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK, output_device_index=1)
+    mic = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK, input_device_index=input_device_index)
+    speaker = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK, output_device_index=output_device_index)
 
     agent = RealtimeAgent(
         name="Assistant",
@@ -80,4 +107,6 @@ async def main():
     p.terminate()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = parse_args()
+    init_weave(args.weave_project)
+    asyncio.run(main(input_device_index=args.input_device, output_device_index=args.output_device))
