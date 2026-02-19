@@ -16,12 +16,6 @@ CHUNK = 1024
 MAX_INPUT_CHANNELS = 1
 MAX_OUTPUT_CHANNELS = 1
 
-from agents.realtime.config import (
-    RealtimeAudioConfig,
-    RealtimeAudioInputConfig,
-    RealtimeAudioOutputConfig
-)
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Realtime agent with Weave logging")
@@ -107,22 +101,22 @@ async def main(*, input_device_index: int | None = None, output_device_index: in
         target=play_audio, args=(speaker, audio_output_queue), daemon=True
     ).start()
 
-    agent = RealtimeAgent(
+    s_agent = RealtimeAgent(
         name="Speech Assistant",
         instructions="You are a tool using AI. Use tools to accomplish a task whenever possible"
     )
+    # t_agent = RealtimeAgent(
+    #     name="Transcriber Assistant",
+    #     instructions="You are a transcription dedicated AI"
+    # )
 
-    runner = RealtimeRunner(agent, config={
+    s_runner = RealtimeRunner(s_agent, config={
         "model_settings": {
             "model_name": "gpt-realtime",
-            "modalities": ["audio", "text"],
-            "output_modalities": ["audio", "text"],
+            "modalities": ["audio"],
+            "output_modalities": ["audio"],
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": "gpt-4o-mini-transcribe",
-                "language": "en",
-            },
             "speed": 1.2,
             "turn_detection": {
                 "type": "semantic_vad",
@@ -131,10 +125,17 @@ async def main(*, input_device_index: int | None = None, output_device_index: in
             },
         }
     })
-
+    # runner = RealtimeRunner(t_agent, config={
+    #     "model_settings": {
+    #         "model_name": "gpt-4o-mini-transcribe",
+    #         "modalities": ["audio"],
+    #         "output_modalities": ["text"],
+    #         "input_audio_format": "pcm16",
+    #     }
+    # })
     print("--- Session Active (Speak into mic) ---")
 
-    async with await runner.run() as session:
+    async with await s_runner.run() as session:
         async def send_mic_audio():
             try:
                 while True:
@@ -164,11 +165,11 @@ async def main(*, input_device_index: int | None = None, output_device_index: in
                             break
                 elif event.type == "transcript_delta":
                     print(event.delta, end="", flush=True)
-                elif event.type == "raw_model_event":
+                if event.type == "raw_model_event":
                     data = event.data
-                    print("raw event")
-                    print(data)
-                    evt_type = getattr(data, "type", "")
+                    print("realtime event: ", data.type)
+                else:
+                    print("agent event", event.type)
 
         mic_task = asyncio.create_task(send_mic_audio())
         try:
