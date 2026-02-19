@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import queue
+import threading
 import weave
 import pyaudio
 import numpy as np
@@ -7,6 +9,12 @@ from weave.integrations import patch_openai_realtime
 from agents.realtime import RealtimeAgent, RealtimeRunner
 
 DEFAULT_WEAVE_PROJECT = "ga-realtime-agents-example"
+
+FORMAT = pyaudio.paInt16
+RATE = 24000
+CHUNK = 1024
+MAX_INPUT_CHANNELS = 1
+MAX_OUTPUT_CHANNELS = 1
 
 
 def parse_args():
@@ -19,14 +27,14 @@ def parse_args():
     parser.add_argument(
         "--input-device",
         type=int,
-        default=0,
-        help="PyAudio input (mic) device index. Run mic_detect.py to list devices.",
+        default=None,
+        help="PyAudio input (mic) device index. Defaults to system default. Run mic_detect.py to list devices.",
     )
     parser.add_argument(
         "--output-device",
         type=int,
-        default=1,
-        help="PyAudio output (speaker) device index. Run mic_detect.py to list devices.",
+        default=None,
+        help="PyAudio output (speaker) device index. Defaults to system default. Run mic_detect.py to list devices.",
     )
     return parser.parse_args()
 
@@ -37,64 +45,132 @@ def init_weave(project_name: str | None = None) -> None:
     patch_openai_realtime()
 
 
-# Required Audio Specs
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 24000
-CHUNK = 1024
+def play_audio(output_stream: pyaudio.Stream, audio_output_queue: queue.Queue):
+    """Runs in a separate thread because pyaudio's write() blocks until the
+    sound card consumes the samples. Decoupling playback from the async event
+    loop lets us flush the queue on interrupt without waiting for in-flight
+    writes to finish."""
+    while True:
+        data = audio_output_queue.get()
+        if data is None:
+            break
+        output_stream.write(data)
 
-async def main(*, input_device_index: int = 0, output_device_index: int = 1):
+
+async def main(*, input_device_index: int | None = None, output_device_index: int | None = None):
     p = pyaudio.PyAudio()
-    # Setup Mic and Speaker
-    mic = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK, input_device_index=input_device_index)
-    speaker = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK, output_device_index=output_device_index)
 
-    agent = RealtimeAgent(
-        name="Assistant",
+    if input_device_index is None:
+        input_device_index = int(p.get_default_input_device_info()['index'])
+    if output_device_index is None:
+        output_device_index = int(p.get_default_output_device_info()['index'])
+
+    # Channel count must match the device's capabilities or pyaudio will error on open
+    input_info = p.get_device_info_by_index(input_device_index)
+    output_info = p.get_device_info_by_index(output_device_index)
+    input_channels = min(int(input_info['maxInputChannels']), MAX_INPUT_CHANNELS)
+    output_channels = min(int(output_info['maxOutputChannels']), MAX_OUTPUT_CHANNELS)
+
+    mic = p.open(
+        format=FORMAT,
+        channels=input_channels,
+        rate=RATE,
+        input=True,
+        output=False,
+        frames_per_buffer=CHUNK,
+        input_device_index=input_device_index,
+        start=False,
+    )
+    speaker = p.open(
+        format=FORMAT,
+        channels=output_channels,
+        rate=RATE,
+        input=False,
+        output=True,
+        frames_per_buffer=CHUNK,
+        output_device_index=output_device_index,
+        start=False,
+    )
+    mic.start_stream()
+    speaker.start_stream()
+
+    # Audio goes through a queue so we can flush it when the user interrupts.
+    # Writing directly to the speaker makes it impossible to cancel in-flight audio.
+    audio_output_queue = queue.Queue()
+    threading.Thread(
+        target=play_audio, args=(speaker, audio_output_queue), daemon=True
+    ).start()
+
+    s_agent = RealtimeAgent(
+        name="Speech Assistant",
         instructions="You are a tool using AI. Use tools to accomplish a task whenever possible"
     )
-    runner = RealtimeRunner(agent, config={
+    # t_agent = RealtimeAgent(
+    #     name="Transcriber Assistant",
+    #     instructions="You are a transcription dedicated AI"
+    # )
+
+    s_runner = RealtimeRunner(s_agent, config={
         "model_settings": {
-            "modalities": ["text", "audio"],
-            "output_modalities": ["text", "audio"],
+            "model_name": "gpt-realtime",
+            "modalities": ["audio"],
+            "output_modalities": ["audio"],
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "speed": 1.2,
+            "turn_detection": {
+                "type": "semantic_vad",
+                "interrupt_response": True,
+                "create_response": True,
+            },
         }
     })
-
+    # runner = RealtimeRunner(t_agent, config={
+    #     "model_settings": {
+    #         "model_name": "gpt-4o-mini-transcribe",
+    #         "modalities": ["audio"],
+    #         "output_modalities": ["text"],
+    #         "input_audio_format": "pcm16",
+    #     }
+    # })
     print("--- Session Active (Speak into mic) ---")
 
-    # The 'run' method returns the RealtimeSession object you provided
-    async with await runner.run() as session:
+    async with await s_runner.run() as session:
         async def send_mic_audio():
-            """Reads from hardware and uses the validated 'send_audio' method."""
             try:
                 while True:
                     raw_data = mic.read(CHUNK, exception_on_overflow=False)
 
-                    # Visual Volume Meter
                     audio_data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float64)
                     rms = np.sqrt(np.mean(audio_data**2))
                     meter = int(min(rms / 50, 50))
                     print(f"Mic Level: {'█' * meter}{' ' * (50-meter)} |", end="\r")
 
-                    # VALIDATED METHOD: session.send_audio
                     await session.send_audio(raw_data)
-
                     await asyncio.sleep(0)
             except Exception:
                 pass
 
         async def handle_events():
-            """Iterates over the session as an AsyncIterator."""
             async for event in session:
-                # Based on your imports: RealtimeAudio contains the audio data
                 if event.type == "audio":
-                    # event.audio is the RealtimeModelEvent containing the bytes
-                    speaker.write(event.audio.data)
-                # Check for transcripts to print
+                    audio_output_queue.put(event.audio.data)
+                elif event.type == "audio_interrupted":
+                    # User started speaking — discard buffered AI audio so it
+                    # doesn't play over the user's voice
+                    while not audio_output_queue.empty():
+                        try:
+                            audio_output_queue.get_nowait()
+                        except queue.Empty:
+                            break
                 elif event.type == "transcript_delta":
                     print(event.delta, end="", flush=True)
+                if event.type == "raw_model_event":
+                    data = event.data
+                    print("realtime event: ", data.type)
+                else:
+                    print("agent event", event.type)
 
-        # Execute
         mic_task = asyncio.create_task(send_mic_audio())
         try:
             await handle_events()
@@ -102,6 +178,7 @@ async def main(*, input_device_index: int = 0, output_device_index: int = 1):
             mic_task.cancel()
 
     # Cleanup
+    audio_output_queue.put(None)  # signal playback thread to exit
     mic.close()
     speaker.close()
     p.terminate()
