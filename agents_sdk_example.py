@@ -16,6 +16,8 @@ CHUNK = 1024
 MAX_INPUT_CHANNELS = 1
 MAX_OUTPUT_CHANNELS = 1
 
+inp_dev_idx = None
+out_dev_idx = None
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Realtime agent with Weave logging")
@@ -23,18 +25,21 @@ def parse_args():
         "--weave-project",
         default=DEFAULT_WEAVE_PROJECT,
         help=f"Weave project name (default: {DEFAULT_WEAVE_PROJECT})",
+        dest=DEFAULT_WEAVE_PROJECT
     )
     parser.add_argument(
         "--input-device",
         type=int,
         default=None,
         help="PyAudio input (mic) device index. Defaults to system default. Run mic_detect.py to list devices.",
+        dest=inp_dev_idx
     )
     parser.add_argument(
         "--output-device",
         type=int,
         default=None,
         help="PyAudio output (speaker) device index. Defaults to system default. Run mic_detect.py to list devices.",
+        dest=out_dev_idx
     )
     return parser.parse_args()
 
@@ -68,6 +73,7 @@ async def main(*, input_device_index: int | None = None, output_device_index: in
     # Channel count must match the device's capabilities or pyaudio will error on open
     input_info = p.get_device_info_by_index(input_device_index)
     output_info = p.get_device_info_by_index(output_device_index)
+
     input_channels = min(int(input_info['maxInputChannels']), MAX_INPUT_CHANNELS)
     output_channels = min(int(output_info['maxOutputChannels']), MAX_OUTPUT_CHANNELS)
 
