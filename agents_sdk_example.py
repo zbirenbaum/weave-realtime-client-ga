@@ -1,7 +1,10 @@
 import argparse
 import asyncio
 import queue
+import sys
+import termios
 import threading
+import tty
 import weave
 import pyaudio
 import numpy as np
@@ -48,6 +51,27 @@ def init_weave(project_name: str | None = None) -> None:
     name = project_name or DEFAULT_WEAVE_PROJECT
     weave.init(name)
     patch_openai_realtime()
+
+
+mic_enabled = True
+
+def start_keylistener():
+    """Listen for 't' key to toggle mic on/off. Runs in a daemon thread."""
+    global mic_enabled
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch.lower() == 't':
+                mic_enabled = not mic_enabled
+                state = "ON" if mic_enabled else "OFF"
+                print(f"\n🎙  Mic {state} (press t to toggle)")
+            elif ch == '\x03':  # Ctrl-C
+                break
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def play_audio(output_stream: pyaudio.Stream, audio_output_queue: queue.Queue):
@@ -130,19 +154,27 @@ async def main(*, input_device_index: int | None = None, output_device_index: in
         }
     })
     print("--- Session Active (Speak into mic) ---")
+    print("🎙  Mic ON (press t to toggle)")
+
+    threading.Thread(target=start_keylistener, daemon=True).start()
 
     async with await s_runner.run() as session:
         async def send_mic_audio():
+            silence = b'\x00' * CHUNK * 2  # 16-bit silence
             try:
                 while True:
                     raw_data = mic.read(CHUNK, exception_on_overflow=False)
 
-                    audio_data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float64)
-                    rms = np.sqrt(np.mean(audio_data**2))
-                    meter = int(min(rms / 50, 50))
-                    print(f"Mic Level: {'█' * meter}{' ' * (50-meter)} |", end="\r")
+                    if mic_enabled:
+                        audio_data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float64)
+                        rms = np.sqrt(np.mean(audio_data**2))
+                        meter = int(min(rms / 50, 50))
+                        print(f"Mic Level: {'█' * meter}{' ' * (50-meter)} | 🎙 ON ", end="\r")
+                        await session.send_audio(raw_data)
+                    else:
+                        print(f"Mic Level: {' ' * 50} | 🎙 OFF", end="\r")
+                        await session.send_audio(silence)
 
-                    await session.send_audio(raw_data)
                     await asyncio.sleep(0)
             except Exception:
                 pass
@@ -175,4 +207,9 @@ async def main(*, input_device_index: int | None = None, output_device_index: in
 if __name__ == "__main__":
     args = parse_args()
     init_weave(args.weave_project)
-    asyncio.run(main(input_device_index=args.input_device, output_device_index=args.output_device))
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        asyncio.run(main(input_device_index=args.input_device, output_device_index=args.output_device))
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
