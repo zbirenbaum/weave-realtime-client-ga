@@ -121,7 +121,9 @@ async def main(*, input_device_index: int | None = None, output_device_index: in
             "output_audio_format": "pcm16",
             "speed": 1.2,
             "turn_detection": {
-                "type": "semantic_vad",
+                "prefix_padding_ms": 100,
+                "silence_duration_ms": 100,
+                "type": "server_vad", # try server_vad too
                 "interrupt_response": True,
                 "create_response": True,
             },
